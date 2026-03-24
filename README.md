@@ -88,10 +88,10 @@ Older instructions may ask for your Google password or an app password and call 
 
 ### Creation and update tools
 * `create_note`: Create a new note with title and text (automatically adds keep-mcp label)
-* `create_list`: Create a checklist note
+* `create_list`: Create a checklist note (items may include `parent_item_id` to nest under another item)
 * `update_note`: Update a note's title and text
-* `add_list_item`: Add an item to a checklist note
-* `update_list_item`: Update checklist item text and checked state
+* `add_list_item`: Add an item to a checklist note (optional `parent_item_id` to add as a sub-item)
+* `update_list_item`: Update checklist item text, checked state, and/or parent (`parent_item_id` to re-parent; `""` to move to top level)
 * `delete_list_item`: Delete a checklist item
 
 ### Note state tools

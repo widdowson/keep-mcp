@@ -65,6 +65,12 @@ class DummyItem:
         self.checked = checked
         self.parent_item = None
 
+    def indent(self, child):
+        child.parent_item = self
+
+    def dedent(self, child):
+        child.parent_item = None
+
     def delete(self):
         self.deleted = True
 
@@ -450,6 +456,63 @@ def test_modification_guard_blocks_when_unlabeled(keep, monkeypatch):
     monkeypatch.setattr(cli, "can_modify_note", lambda _: False)
     with pytest.raises(ValueError, match="cannot be modified"):
         cli.update_note("n1", title="x")
+
+
+def test_create_list_with_parent_item_id(keep):
+    items = [
+        {"text": "parent", "checked": False},
+        {"text": "child", "checked": False, "parent_item_id": "i1"},
+    ]
+    data = json.loads(cli.create_list("nested", items=items))
+    child = next(i for i in data["items"] if i["text"] == "child")
+    assert child["parent_item_id"] == "i1"
+
+
+def test_create_list_invalid_parent_item_id_raises(keep):
+    items = [
+        {"text": "child", "checked": False, "parent_item_id": "nonexistent"},
+    ]
+    with pytest.raises(ValueError, match="parent_item_id 'nonexistent' not found"):
+        cli.create_list("bad", items=items)
+
+
+def test_add_list_item_with_parent(keep):
+    add = json.loads(cli.add_list_item("list1", "sub", parent_item_id="i1"))
+    item_id = add["item_id"]
+    item = keep.notes["list1"].get(item_id)
+    assert item.parent_item is not None
+    assert item.parent_item.id == "i1"
+
+
+def test_add_list_item_invalid_parent_raises(keep):
+    with pytest.raises(ValueError, match="Parent item with ID nonexistent not found"):
+        cli.add_list_item("list1", "sub", parent_item_id="nonexistent")
+
+
+def test_update_list_item_reparent(keep):
+    # Add two items then reparent the second under the first.
+    add1 = json.loads(cli.add_list_item("list1", "a"))
+    add2 = json.loads(cli.add_list_item("list1", "b"))
+    data = json.loads(
+        cli.update_list_item("list1", add2["item_id"], parent_item_id=add1["item_id"])
+    )
+    child = next(i for i in data["items"] if i["id"] == add2["item_id"])
+    assert child["parent_item_id"] == add1["item_id"]
+
+
+def test_update_list_item_dedent(keep):
+    # Add an item as a child then dedent it.
+    add = json.loads(cli.add_list_item("list1", "child", parent_item_id="i1"))
+    item_id = add["item_id"]
+    data = json.loads(cli.update_list_item("list1", item_id, parent_item_id=""))
+    child = next(i for i in data["items"] if i["id"] == item_id)
+    assert child["parent_item_id"] is None
+
+
+def test_update_list_item_invalid_parent_raises(keep):
+    add = json.loads(cli.add_list_item("list1", "x"))
+    with pytest.raises(ValueError, match="Parent item with ID bad not found"):
+        cli.update_list_item("list1", add["item_id"], parent_item_id="bad")
 
 
 def test_main_runs_stdio_transport(monkeypatch):

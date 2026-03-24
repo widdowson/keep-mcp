@@ -76,6 +76,18 @@ def test_serialize_note_for_note_type():
 def test_serialize_note_for_list_type():
     data = serialize_note(DummyListNote())
     assert data["items"][0]["id"] == "i1"
+    assert data["items"][0]["parent_item_id"] is None
+
+
+def test_serialize_list_item_with_parent():
+    parent = SimpleNamespace(id="p1")
+    note = DummyListNote()
+    note.items.append(
+        SimpleNamespace(id="i2", text="child", checked=False, parent_item=parent)
+    )
+    data = serialize_note(note)
+    child = next(i for i in data["items"] if i["id"] == "i2")
+    assert child["parent_item_id"] == "p1"
 
 
 def test_serialize_note_includes_timestamps():

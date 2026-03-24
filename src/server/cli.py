@@ -196,18 +196,40 @@ def create_list(title: str | None = None, items: list[dict[str, Any]] | None = N
 
     items should be objects like: {"text": "task", "checked": false}.
     checked must be a boolean when supplied and defaults to false.
+
+    Items can be nested under a parent item by specifying parent_item_id
+    (the id of another item in the same list):
+    {"text": "subtask", "checked": false, "parent_item_id": "<parent-item-id>"}
+
+    Parent items must appear before their children in the list.
     """
     keep = get_client()
-    formatted_items = None
+
+    # Create the list without items first so we can handle hierarchy.
+    flat_items = None
     if items:
         for item in items:
             if not isinstance(item.get("checked", False), bool):
                 raise TypeError("Each item's checked field must be a boolean")
-        formatted_items = [
+        flat_items = [
             (item.get("text", ""), item.get("checked", False)) for item in items
         ]
 
-    note = keep.createList(title=title, items=formatted_items)
+    note = keep.createList(title=title, items=flat_items)
+
+    # Set up parent/child relationships for items that specify parent_item_id.
+    if items:
+        created_items = list(note.items)
+        for idx, item_spec in enumerate(items):
+            parent_item_id = item_spec.get("parent_item_id")
+            if not parent_item_id:
+                continue
+            parent = note.get(parent_item_id)
+            if not parent:
+                raise ValueError(
+                    f"parent_item_id '{parent_item_id}' not found in the list"
+                )
+            parent.indent(created_items[idx])
 
     label = keep.findLabel("keep-mcp")
     if not label:
@@ -220,23 +242,38 @@ def create_list(title: str | None = None, items: list[dict[str, Any]] | None = N
 
 @mcp.tool()
 @keep_operation
-def add_list_item(note_id: str, text: str, checked: bool = False) -> str:
-    """Add an item to a checklist note."""
+def add_list_item(note_id: str, text: str, checked: bool = False, parent_item_id: str | None = None) -> str:
+    """Add an item to a checklist note. Optionally nest it under an existing item via parent_item_id."""
     keep, note = _get_note_or_raise(note_id)
     _ensure_modifiable(note)
 
     if not isinstance(note, gkeepapi.node.List):
         raise TypeError(f"Note with ID {note_id} is not a list")
 
+    if parent_item_id is not None:
+        parent = note.get(parent_item_id)
+        if not parent:
+            raise ValueError(f"Parent item with ID {parent_item_id} not found")
+
     item = note.add(text=text, checked=checked)
+
+    if parent_item_id is not None:
+        parent.indent(item)
+
     keep.sync()
     return json.dumps({"note_id": note.id, "item_id": item.id})
 
 
 @mcp.tool()
 @keep_operation
-def update_list_item(note_id: str, item_id: str, text: str | None = None, checked: bool | None = None) -> str:
-    """Update checklist item text and/or checked state."""
+def update_list_item(
+    note_id: str,
+    item_id: str,
+    text: str | None = None,
+    checked: bool | None = None,
+    parent_item_id: str | None = None,
+) -> str:
+    """Update checklist item text, checked state, and/or parent. Set parent_item_id to re-parent; use "" to move to top level."""
     keep, note = _get_note_or_raise(note_id)
     _ensure_modifiable(note)
 
@@ -251,6 +288,15 @@ def update_list_item(note_id: str, item_id: str, text: str | None = None, checke
         item.text = text
     if checked is not None:
         item.checked = checked
+    if parent_item_id is not None:
+        if parent_item_id == "":
+            if item.parent_item is not None:
+                item.parent_item.dedent(item)
+        else:
+            parent = note.get(parent_item_id)
+            if not parent:
+                raise ValueError(f"Parent item with ID {parent_item_id} not found")
+            parent.indent(item)
 
     keep.sync()
     return json.dumps(serialize_note(note))
