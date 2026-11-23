@@ -1,6 +1,5 @@
 import json
 
-import httpx
 import pytest
 
 from server import cli
@@ -23,18 +22,35 @@ def token_pair():
     return new_token()
 
 
-def _client(token_hashes):
+async def _post(token_hashes, headers):
+    """Drive the middleware with one ASGI POST; return (status, headers, body)."""
     app = BearerAuthMiddleware(_echo_app, token_hashes)
-    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/mcp",
+        "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()],
+    }
+    sent = []
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        sent.append(message)
+
+    await app(scope, receive, send)
+    start = sent[0]
+    body = b"".join(m.get("body", b"") for m in sent[1:])
+    return start["status"], dict(start["headers"]), body.decode()
 
 
 @pytest.mark.anyio
 async def test_valid_token_sets_caller(token_pair):
     token, digest = token_pair
-    async with _client({digest: "andrew"}) as client:
-        resp = await client.post("/mcp", headers={"Authorization": f"Bearer {token}"})
-    assert resp.status_code == 200
-    assert resp.text == "andrew"
+    status, _, body = await _post({digest: "andrew"}, {"Authorization": f"Bearer {token}"})
+    assert status == 200
+    assert body == "andrew"
 
 
 @pytest.mark.anyio
@@ -42,10 +58,9 @@ async def test_valid_token_sets_caller(token_pair):
 async def test_missing_or_wrong_token_is_rejected(token_pair, header):
     _, digest = token_pair
     headers = {"Authorization": header} if header else {}
-    async with _client({digest: "andrew"}) as client:
-        resp = await client.post("/mcp", headers=headers)
-    assert resp.status_code == 401
-    assert resp.headers["www-authenticate"].startswith("Bearer")
+    status, resp_headers, _ = await _post({digest: "andrew"}, headers)
+    assert status == 401
+    assert resp_headers[b"www-authenticate"].startswith(b"Bearer")
 
 
 def test_load_token_map(tmp_path, token_pair):
