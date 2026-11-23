@@ -357,6 +357,34 @@ keep-mcp --transport streamable-http --host 127.0.0.1 --port 8000
 > [!NOTE]
 > `keep-mcp` binds to `127.0.0.1` by default with DNS rebinding protection enabled. To expose the server to remote or web clients (such as Gemini web), place an authenticating proxy (such as [mcp-auth-proxy](https://github.com/sigbit/mcp-auth-proxy)) in front of the server.
 
+### Requiring a bearer token
+
+To expose the server beyond localhost without a separate auth proxy, give each caller their own bearer token. The server stores only SHA-256 hashes of the tokens.
+
+1. Create a token for each caller. Give the printed token to that person and add the printed entry to a JSON token map:
+   ```bash
+   keep-mcp --new-token alice
+   # token for alice (give this to them, it is not stored): kmcp_...
+   # token-map entry: "alice": "3f1c..."
+   ```
+   ```json
+   { "alice": "3f1c...", "bob": "9ab2..." }
+   ```
+2. Start the server with the token map, and name the public host your reverse proxy forwards (requests with any other `Host` header are refused):
+   ```bash
+   keep-mcp --transport streamable-http --host 0.0.0.0 \
+     --token-map /etc/keep-mcp/tokens.json \
+     --allowed-host keep-mcp.example.com
+   ```
+   Both options can also be set with `KEEP_MCP_TOKEN_MAP` and `KEEP_MCP_ALLOWED_HOSTS` (comma-separated).
+3. Clients send `Authorization: Bearer kmcp_...` with every request. Requests without a known token get `401`. The server logs which caller made each request. Remove a caller's entry and restart to revoke their access.
+
+All callers act as the single Google account in `GOOGLE_EMAIL`. TLS is left to the reverse proxy.
+
+### Sharing new notes automatically
+
+Set `KEEP_MCP_DEFAULT_COLLABORATORS` to a comma-separated list of emails, and every note or list created through `create_note` or `create_list` is shared with them. This works well with a dedicated Google account that owns shared lists for a household.
+
 ## Running in Docker
 
 A `Dockerfile` is provided for running `keep-mcp` as a containerized Streamable HTTP server listening on port 8000.

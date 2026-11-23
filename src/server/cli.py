@@ -54,6 +54,19 @@ class ReplacementChecklistItem(TypedDict, total=False):
     checked: StrictBool
 
 
+def _default_collaborators() -> list[str]:
+    """Emails every new note is shared with, from KEEP_MCP_DEFAULT_COLLABORATORS (comma-separated)."""
+    raw = os.getenv("KEEP_MCP_DEFAULT_COLLABORATORS", "")
+    return [email.strip() for email in raw.split(",") if email.strip()]
+
+
+def _share_with_defaults(note) -> None:
+    existing = set(note.collaborators.all())
+    for email in _default_collaborators():
+        if email not in existing:
+            note.collaborators.add(email)
+
+
 def _get_note_or_raise(note_id: str):
     keep = get_client()
     note = keep.get(note_id)
@@ -188,7 +201,7 @@ def get_note(note_id: str) -> dict[str, Any]:
 @mcp.tool(annotations=ADDITIVE)
 @keep_operation
 def create_note(title: str | None = None, text: str | None = None) -> dict[str, Any]:
-    """Create a new note with title and text."""
+    """Create a new note with title and text. It is shared with the server's default collaborators, if any."""
     keep = get_client()
     note = keep.createNote(title=title, text=text)
 
@@ -197,6 +210,7 @@ def create_note(title: str | None = None, text: str | None = None) -> dict[str, 
         label = keep.createLabel("keep-mcp")
 
     note.labels.add(label)
+    _share_with_defaults(note)
     keep.sync()
 
     return serialize_note(note)
@@ -205,7 +219,7 @@ def create_note(title: str | None = None, text: str | None = None) -> dict[str, 
 @mcp.tool(annotations=ADDITIVE)
 @keep_operation
 def create_list(title: str | None = None, items: list[ChecklistItem] | None = None) -> dict[str, Any]:
-    """Create a new checklist note. An item's checked defaults to false."""
+    """Create a new checklist note. An item's checked defaults to false. It is shared with the server's default collaborators, if any."""
     keep = get_client()
     formatted_items = None
     if items:
@@ -219,6 +233,7 @@ def create_list(title: str | None = None, items: list[ChecklistItem] | None = No
     if not label:
         label = keep.createLabel("keep-mcp")
     note.labels.add(label)
+    _share_with_defaults(note)
 
     keep.sync()
     return serialize_note(note)
@@ -614,19 +629,67 @@ def download_media(note_id: str, dest_dir: str, blob_id: str | None = None) -> l
     return saved
 
 
+def _run_authenticated_http(args) -> None:
+    import uvicorn
+    from mcp.server.transport_security import TransportSecuritySettings
+
+    from .http_auth import BearerAuthMiddleware, load_token_map
+
+    allowed_hosts = [f"127.0.0.1:{args.port}", f"localhost:{args.port}", *args.allowed_host]
+    app = mcp.streamable_http_app(
+        host=args.host,
+        transport_security=TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=allowed_hosts,
+            allowed_origins=[f"https://{h}" for h in args.allowed_host],
+        ),
+    )
+    app = BearerAuthMiddleware(app, load_token_map(args.token_map))
+    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Google Keep MCP server")
     parser.add_argument("--transport", choices=["stdio", "streamable-http"], default="stdio")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument(
+        "--token-map",
+        default=os.getenv("KEEP_MCP_TOKEN_MAP"),
+        help="JSON file of caller name -> SHA-256 of their bearer token. "
+        "Requires that bearer token on every streamable-http request.",
+    )
+    parser.add_argument(
+        "--allowed-host",
+        action="append",
+        default=[h for h in os.getenv("KEEP_MCP_ALLOWED_HOSTS", "").split(",") if h],
+        help="Public Host header to accept behind a reverse proxy (repeatable), "
+        "e.g. keep-mcp.example.com",
+    )
+    parser.add_argument(
+        "--new-token",
+        metavar="NAME",
+        help="Print a new bearer token for NAME and the token-map line to add, then exit.",
+    )
     args = parser.parse_args()
+
+    if args.new_token:
+        from .http_auth import new_token
+
+        token, digest = new_token()
+        print(f"token for {args.new_token} (give this to them, it is not stored): {token}")
+        print(f'token-map entry: "{args.new_token}": "{digest}"')
+        return
 
     if args.transport == "stdio":
         mcp.run()
-    else:
-        mcp.remove_tool("download_media")
-        mcp.run(transport="streamable-http", host=args.host, port=args.port)
+        return
 
+    mcp.remove_tool("download_media")
+    if args.token_map:
+        _run_authenticated_http(args)
+    else:
+        mcp.run(transport="streamable-http", host=args.host, port=args.port)
 
 if __name__ == "__main__":
     main()
