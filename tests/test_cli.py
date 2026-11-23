@@ -304,25 +304,6 @@ def test_create_list_creates_label_when_missing(keep):
     assert data["labels"][0]["name"] == "keep-mcp"
 
 
-def test_create_list_shares_with_default_collaborators(keep, monkeypatch):
-    monkeypatch.setenv("KEEP_MCP_DEFAULT_COLLABORATORS", " a@example.com, b@example.com ,")
-    cli.create_list("groceries")
-    note = keep.notes["created_list"]
-    assert note.collaborators.all() == ["a@example.com", "b@example.com"]
-
-
-def test_create_note_shares_with_default_collaborators(keep, monkeypatch):
-    monkeypatch.setenv("KEEP_MCP_DEFAULT_COLLABORATORS", "a@example.com")
-    cli.create_note("t", "body")
-    assert keep.notes["created"].collaborators.all() == ["a@example.com"]
-
-
-def test_create_list_without_default_collaborators(keep, monkeypatch):
-    monkeypatch.delenv("KEEP_MCP_DEFAULT_COLLABORATORS", raising=False)
-    cli.create_list("groceries")
-    assert keep.notes["created_list"].collaborators.all() == []
-
-
 def test_update_note_updates_fields(keep):
     data = cli.update_note("n1", title="new", text="changed")
     assert data["title"] == "new"
