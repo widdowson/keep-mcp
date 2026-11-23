@@ -45,6 +45,7 @@ Color = Literal[
 class ChecklistItem(TypedDict, total=False):
     text: str
     checked: StrictBool
+    parent_item_id: str
 
 
 class ReplacementChecklistItem(TypedDict, total=False):
@@ -205,7 +206,11 @@ def create_note(title: str | None = None, text: str | None = None) -> dict[str, 
 @mcp.tool(annotations=ADDITIVE)
 @keep_operation
 def create_list(title: str | None = None, items: list[ChecklistItem] | None = None) -> dict[str, Any]:
-    """Create a new checklist note. An item's checked defaults to false."""
+    """Create a new checklist note. An item's checked defaults to false.
+
+    An item can be nested under another item in the same list with
+    parent_item_id. Parent items must appear before their children.
+    """
     keep = get_client()
     formatted_items = None
     if items:
@@ -214,6 +219,17 @@ def create_list(title: str | None = None, items: list[ChecklistItem] | None = No
         ]
 
     note = keep.createList(title=title, items=formatted_items)
+
+    if items:
+        created_items = list(note.items)
+        for index, item in enumerate(items):
+            parent_item_id = item.get("parent_item_id")
+            if not parent_item_id:
+                continue
+            parent = note.get(parent_item_id)
+            if not parent:
+                raise ToolError(f"parent_item_id '{parent_item_id}' not found in the list")
+            parent.indent(created_items[index])
 
     label = keep.findLabel("keep-mcp")
     if not label:
@@ -226,19 +242,38 @@ def create_list(title: str | None = None, items: list[ChecklistItem] | None = No
 
 @mcp.tool(annotations=ADDITIVE)
 @keep_operation
-def add_list_item(note_id: str, text: str, checked: bool = False) -> dict[str, Any]:
-    """Add an item to a checklist note."""
+def add_list_item(
+    note_id: str, text: str, checked: bool = False, parent_item_id: str | None = None
+) -> dict[str, Any]:
+    """Add an item to a checklist note. Optionally nest it under an existing item via parent_item_id."""
     keep, note = _get_list_or_raise(note_id)
 
+    parent = None
+    if parent_item_id is not None:
+        parent = note.get(parent_item_id)
+        if not parent:
+            raise ToolError(f"Parent item with ID {parent_item_id} not found")
+
     item = note.add(text=text, checked=checked)
+    if parent is not None:
+        parent.indent(item)
     keep.sync()
     return {"note_id": note.id, "item_id": item.id}
 
 
 @mcp.tool()
 @keep_operation
-def update_list_item(note_id: str, item_id: str, text: str | None = None, checked: bool | None = None) -> dict[str, Any]:
-    """Update checklist item text and/or checked state."""
+def update_list_item(
+    note_id: str,
+    item_id: str,
+    text: str | None = None,
+    checked: bool | None = None,
+    parent_item_id: str | None = None,
+) -> dict[str, Any]:
+    """Update checklist item text, checked state, and/or parent.
+
+    Set parent_item_id to re-parent the item; use "" to move it to the top level.
+    """
     keep, note = _get_list_or_raise(note_id)
 
     item = note.get(item_id)
@@ -249,6 +284,15 @@ def update_list_item(note_id: str, item_id: str, text: str | None = None, checke
         item.text = text
     if checked is not None:
         item.checked = checked
+    if parent_item_id is not None:
+        if parent_item_id == "":
+            if item.parent_item is not None:
+                item.parent_item.dedent(item)
+        else:
+            parent = note.get(parent_item_id)
+            if not parent:
+                raise ToolError(f"Parent item with ID {parent_item_id} not found")
+            parent.indent(item)
 
     keep.sync()
     return serialize_note(note)
