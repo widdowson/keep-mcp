@@ -11,12 +11,11 @@ import requests
 from dotenv import load_dotenv
 from mcp.server.mcpserver.exceptions import ToolError
 
-from . import raw_nodes
+from . import formatting, raw_nodes
 
 KEEP_MCP_LABEL = "keep-mcp"
 
-# gkeepapi drops sync fields it does not model when it saves a node, which
-# strips Keep's rich-text formatting from edited list items. Echo them back.
+# Record the raw sync JSON per node, for get_note_raw and formatting lookups.
 raw_nodes.install()
 
 _keep_client = None
@@ -68,6 +67,7 @@ def get_client():
     
     # Initialize the Keep API
     raw_nodes.reset()
+    formatting.reader.reset()
     keep = gkeepapi.Keep()
     
     # Authenticate
@@ -96,37 +96,80 @@ def serialize_label(label):
     return {'id': label.id, 'name': label.name}
 
 
-def serialize_list_item(item):
+def serialize_list_item(item, item_formatting=None):
     payload = {
         'id': item.id,
         'text': item.text,
         'checked': item.checked,
         'parent_item_id': item.parent_item.id if item.parent_item else None,
     }
-    _add_unmodeled_fields(payload, item)
+    if item_formatting:
+        payload['formatting'] = item_formatting
     return payload
 
 
-def _add_unmodeled_fields(payload, item):
+def _raw_updated(note):
+    raw = raw_nodes.raw_json(note) or {}
+    return (raw.get('timestamps') or {}).get('updated')
+
+
+def note_formatting(keep, notes, strict=False):
     """
-    Attach the raw sync fields gkeepapi ignores, such as rich-text formatting.
+    Look up rich-text formatting for notes, keyed by note id then item id.
 
-    They are only present when the server sent fields gkeepapi does not model,
-    so plain items keep their compact shape.
+    Plain notes and items are left out. An item whose model text no longer
+    matches its synced text is left out too, rather than shown misaligned.
+    The note body of a plain note is keyed by ''. Formatting is a read-only
+    extra: when the model can't be fetched, notes come back without it,
+    unless strict is true, when the error is raised as a ToolError.
     """
-    if item is None:
-        return
-    extras = raw_nodes.unmodeled_fields(item)
-    if extras:
-        payload['unmodeled_fields'] = extras
+    pairs = [(note.id, _raw_updated(note)) for note in notes]
+    pairs = [(note_id, updated) for note_id, updated in pairs if updated]
+    if not pairs:
+        return {}
+    try:
+        models = formatting.reader.for_notes(keep, pairs)
+    except Exception as exc:
+        formatting.logger.warning('Could not fetch Keep formatting', exc_info=True)
+        if strict:
+            raise ToolError(
+                f'Could not check the note for rich-text formatting ({exc}). '
+                'Pass discard_formatting=true to edit the text anyway.'
+            ) from exc
+        return {}
+
+    result = {}
+    for note in notes:
+        parsed_items = models.get(note.id)
+        if not parsed_items:
+            continue
+        texts = {item.id: item.text for item in getattr(note, 'items', [])}
+        if not hasattr(note, 'items'):
+            texts[''] = note.text
+        described = {}
+        for item_id, parsed in parsed_items.items():
+            if texts.get(item_id) != parsed['text']:
+                continue
+            info = formatting.describe(parsed)
+            if info:
+                described[item_id] = info
+        if described:
+            result[note.id] = described
+    return result
 
 
-def serialize_note(note):
+def formatting_for(keep, note, strict=False):
+    """Return {item id: formatting} for one note (see note_formatting)."""
+    return note_formatting(keep, [note], strict=strict).get(note.id, {})
+
+
+def serialize_note(note, note_fmt=None):
     """
     Serialize a Google Keep note into a dictionary.
     
     Args:
         note: A Google Keep note object
+        note_fmt: Optional {item id: formatting} from note_formatting()
         
     Returns:
         dict: A dictionary containing the note's id, title, text, pinned status, color and labels
@@ -150,11 +193,13 @@ def serialize_note(note):
         'collaborators': list(note.collaborators.all()),
     }
 
+    note_fmt = note_fmt or {}
     if hasattr(note, 'items'):
-        payload['items'] = [serialize_list_item(item) for item in note.items]
-    elif hasattr(note, '_get_text_node'):
-        # A plain note keeps its body in one hidden child list item.
-        _add_unmodeled_fields(payload, note._get_text_node())
+        payload['items'] = [
+            serialize_list_item(item, note_fmt.get(item.id)) for item in note.items
+        ]
+    elif note_fmt.get(''):
+        payload['formatting'] = note_fmt['']
 
     payload['media'] = [
         {

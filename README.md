@@ -84,8 +84,8 @@ Older instructions may ask for your Google password or an app password and call 
 
 ### Query and read tools
 * `find`: Search notes (case-insensitive by default) with optional filters for labels, colors, pinned, archived, trashed, creation/update date ranges (ISO 8601, UTC), and a result limit (default 50)
-* `get_note`: Get a single note by ID. Items carrying Keep fields this server does not model (such as rich-text formatting) include them as `unmodeled_fields`
-* `get_note_raw`: Get the raw Keep sync JSON for a note and its child nodes, for diagnosing unmodelled fields
+* `get_note`: Get a single note by ID. Items with rich-text formatting include a `formatting` object (heading level, styled spans and a markdown rendering)
+* `get_note_raw`: Get the raw Keep sync JSON for a note and its child nodes, for diagnosing fields this server does not model
 
 ### Creation and update tools
 * `create_note`: Create a new note with title and text (automatically adds keep-mcp label)
@@ -168,7 +168,7 @@ replacement. Concurrent external edits can also affect the final order.
 
 ### Rich-text formatting
 
-gkeepapi does not model Keep's rich-text formatting and rebuilds each node from its own model when saving, which can strip formatting from an edited item. This server records the fields gkeepapi ignores on each list item and sends them back unchanged, so checking, moving and reordering a formatted item keeps its formatting. Changing the text of a formatted item (or replacing a list containing one) would misalign or drop the formatting, so those calls are refused unless `discard_formatting` is `true`.
+Keep stores bold, italic, underline and headings in a server-side document model, not on the list item nodes gkeepapi syncs. A client sees the model only when its sync request declares the `CL` capability, and then receives it as `serverChanges.snapshot.serializedChunks` on the note instead of the item nodes. `get_note` and `find` fetch the model with a separate read-only `CL` request, cached per note revision, and attach it to each formatted item as `formatting`. Writes still use gkeepapi's legacy node path, which never touches the model, so checking, unchecking and moving an item keep its formatting. New text would leave the formatting misaligned, so text changes on formatted items (and `replace_list_items` on a list with any) are refused unless `discard_formatting` is `true`.
 
 `scripts/dump_raw_nodes.py` prints a note's raw sync JSON without writing anything; it only needs gkeepapi, so it also runs inside a deployed container: `docker exec -i keep-mcp python - NOTE_ID [CAPABILITY ...] < scripts/dump_raw_nodes.py`.
 

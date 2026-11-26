@@ -25,11 +25,13 @@ from .keep_api import (
     can_modify_note,
     fetch_blob_bytes,
     fetch_image_url,
+    formatting_for,
     get_client,
     has_keep_mcp_label,
     is_unsafe_mode,
     keep_operation,
     media_extension,
+    note_formatting,
     serialize_blob,
     serialize_label,
     serialize_note,
@@ -85,21 +87,23 @@ def _get_list_or_raise(note_id: str):
     return keep, note
 
 
-_FORMATTING_WARNING = (
-    "carries Keep fields this server does not model (likely rich-text "
-    "formatting such as bold, italic or a heading). Changing its text would "
-    "misalign or drop that formatting. Pass discard_formatting=true to do it anyway."
-)
+def _guard_formatting(keep, note, item_ids, discard_formatting: bool):
+    """Refuse to rewrite formatted text unless the caller accepts the loss.
 
-
-def _guard_formatting(items, discard_formatting: bool):
-    """Refuse to rewrite formatted items unless the caller accepts the loss."""
-    formatted = [item for item in items if raw_nodes.has_unmodeled_fields(item)]
-    if formatted and not discard_formatting:
-        ids = ", ".join(item.id for item in formatted)
-        raise ToolError(f"List item(s) {ids} {_FORMATTING_WARNING}")
-    for item in formatted:
-        raw_nodes.discard_unmodeled_fields(item)
+    Keep keeps formatting in a server-side model that this server's writes
+    don't carry, so new text would leave the formatting misaligned or dropped.
+    """
+    if discard_formatting:
+        return
+    formatted = formatting_for(keep, note, strict=True)
+    hit = [item_id for item_id in item_ids if item_id in formatted]
+    if hit:
+        what = "The note body" if hit == [""] else "List item(s) " + ", ".join(hit)
+        raise ToolError(
+            f"{what} has rich-text formatting (bold, italic, underline or a heading). "
+            "Changing the text would misalign or drop it. "
+            "Pass discard_formatting=true to do it anyway."
+        )
 
 
 def _parse_utc(value: str | None, param: str) -> datetime | None:
@@ -197,16 +201,22 @@ def find(
     if limit is not None:
         notes = islice(notes, max(limit, 0))
 
-    notes_data = [serialize_note(note) for note in notes]
-    return notes_data
+    notes = list(notes)
+    formats = note_formatting(keep, notes)
+    return [serialize_note(note, formats.get(note.id)) for note in notes]
 
 
 @mcp.tool(annotations=READ_ONLY)
 @keep_operation
 def get_note(note_id: str) -> dict[str, Any]:
-    """Get a note by ID."""
-    _, note = _get_note_or_raise(note_id)
-    return serialize_note(note)
+    """Get a note by ID.
+
+    Items with Keep rich-text formatting carry a formatting object: heading
+    level (1 or 2), styled spans (0-based, end-exclusive offsets into text) and
+    a markdown rendering (underline as <u>). find returns the same.
+    """
+    keep, note = _get_note_or_raise(note_id)
+    return serialize_note(note, formatting_for(keep, note))
 
 
 @mcp.tool(annotations=ADDITIVE)
@@ -298,8 +308,8 @@ def update_list_item(
 
     Set parent_item_id to re-parent the item; use "" to move it to the top level.
     Checking, unchecking and moving keep the item's rich-text formatting. A text
-    change on a formatted item (one with unmodeled_fields) is refused unless
-    discard_formatting is true.
+    change on a formatted item (one with formatting in get_note) is refused
+    unless discard_formatting is true.
     """
     keep, note = _get_list_or_raise(note_id)
 
@@ -308,7 +318,7 @@ def update_list_item(
         raise ToolError(f"List item with ID {item_id} not found")
 
     if text is not None and text != item.text:
-        _guard_formatting([item], discard_formatting)
+        _guard_formatting(keep, note, [item.id], discard_formatting)
         item.text = text
     if checked is not None:
         item.checked = checked
@@ -415,7 +425,7 @@ def replace_list_items(
     refused unless discard_formatting is true.
     """
     keep, note, old_items = _get_flat_list_or_raise(note_id)
-    _guard_formatting(old_items, discard_formatting)
+    _guard_formatting(keep, note, [item.id for item in old_items], discard_formatting)
     for item in old_items:
         item.delete()
     new_items = [note.add(text=item["text"], checked=item.get("checked", False)) for item in items]
@@ -442,10 +452,8 @@ def update_note(
 
     if text is not None and isinstance(note, gkeepapi.node.List):
         raise ToolError("Cannot replace checklist text: use the checklist item tools")
-    if text is not None and text != note.text and hasattr(note, "_get_text_node"):
-        text_node = note._get_text_node()
-        if text_node is not None:
-            _guard_formatting([text_node], discard_formatting)
+    if text is not None and text != note.text:
+        _guard_formatting(keep, note, [""], discard_formatting)
 
     if title is not None:
         note.title = title
@@ -670,9 +678,8 @@ def list_note_media(note_id: str) -> list[dict[str, Any]]:
 def get_note_raw(note_id: str) -> dict[str, Any]:
     """Get the raw Keep sync JSON for a note and its child nodes (items, media).
 
-    For diagnosing fields this server does not model, such as rich-text
-    formatting. Shows what the server last sent; nodes created locally and not
-    yet re-read show null.
+    For diagnosing fields this server does not model. Shows what the server
+    last sent; nodes created locally and not yet re-read show null.
     """
     _, note = _get_note_or_raise(note_id)
     return {

@@ -556,10 +556,28 @@ def test_main_runs_streamable_http_transport(monkeypatch):
 
 @pytest.fixture()
 def formatted(keep, monkeypatch):
-    formatted_ids = {"i1"}
-    monkeypatch.setattr(cli.raw_nodes, "has_unmodeled_fields", lambda item: item.id in formatted_ids)
-    monkeypatch.setattr(cli.raw_nodes, "discard_unmodeled_fields", lambda item: formatted_ids.discard(item.id))
-    return formatted_ids
+    calls = []
+
+    def fake(k, notes, strict=False):
+        calls.append(strict)
+        return {"list1": {"i1": {"heading": None, "spans": [], "markdown": "**existing**"}}}
+
+    monkeypatch.setattr(cli, "note_formatting", fake)
+    monkeypatch.setattr(
+        cli, "formatting_for", lambda k, note, strict=False: fake(k, [note], strict).get(note.id, {})
+    )
+    return calls
+
+
+def test_get_note_includes_formatting(keep, formatted):
+    result = cli.get_note("list1")
+    assert result["items"][0]["formatting"]["markdown"] == "**existing**"
+    assert formatted == [False]
+
+
+def test_find_includes_formatting(keep, formatted):
+    notes = {note["id"]: note for note in cli.find()}
+    assert notes["list1"]["items"][0]["formatting"]["markdown"] == "**existing**"
 
 
 def test_update_list_item_refuses_text_change_on_formatted_item(keep, formatted):
@@ -567,30 +585,44 @@ def test_update_list_item_refuses_text_change_on_formatted_item(keep, formatted)
         cli.update_list_item("list1", "i1", text="new")
     assert keep.notes["list1"].items[0].text == "existing"
     assert keep.sync_calls == 0
+    assert formatted == [True]
 
 
 def test_update_list_item_checks_formatted_item(keep, formatted):
     cli.update_list_item("list1", "i1", checked=True)
     assert keep.notes["list1"].items[0].checked is True
-    assert formatted == {"i1"}
+    assert formatted == []
 
 
 def test_update_list_item_same_text_is_not_a_change(keep, formatted):
     cli.update_list_item("list1", "i1", text="existing", checked=True)
-    assert formatted == {"i1"}
+    assert formatted == []
 
 
 def test_update_list_item_discard_formatting(keep, formatted):
     cli.update_list_item("list1", "i1", text="new", discard_formatting=True)
     assert keep.notes["list1"].items[0].text == "new"
-    assert formatted == set()
+    assert formatted == []
 
 
-def test_replace_list_items_refuses_formatted_list(keep, formatted, monkeypatch):
+def test_update_list_item_plain_item_text_change(keep, formatted):
+    keep.notes["list1"].add("plain")
+    cli.update_list_item("list1", "i2", text="changed")
+    assert keep.notes["list1"].items[1].text == "changed"
+
+
+def test_replace_list_items_refuses_formatted_list(keep, formatted):
     keep.notes["list1"].items[0].super_list_item_id = None
     with pytest.raises(ToolError, match="discard_formatting"):
         cli.replace_list_items("list1", [{"text": "a"}])
     assert keep.notes["list1"].items[0].text == "existing"
+
+
+def test_update_note_refuses_formatted_body(keep, monkeypatch):
+    monkeypatch.setattr(cli, "formatting_for", lambda k, note, strict=False: {"": {}})
+    with pytest.raises(ToolError, match="note body"):
+        cli.update_note("n1", text="new")
+    cli.update_note("n1", title="only the title")
 
 
 def test_get_note_raw(keep, monkeypatch):
