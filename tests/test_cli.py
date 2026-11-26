@@ -588,21 +588,46 @@ def test_update_list_item_refuses_text_change_on_formatted_item(keep, formatted)
     assert formatted == [True]
 
 
+def test_item_tool_responses_include_formatting(keep, formatted):
+    result = cli.update_list_item("list1", "i1", checked=True)
+    assert result["items"][0]["formatting"]["markdown"] == "**existing**"
+    keep.notes["list1"].items[0].super_list_item_id = None
+    keep.notes["list1"].sort_items = lambda key: None
+    result = cli.reorder_list_items("list1", ["i1"])
+    assert result["items"][0]["formatting"]["markdown"] == "**existing**"
+
+
+def test_metadata_writes_skip_formatting(keep, formatted):
+    cli.pin_note("list1", True)
+    cli.set_note_color("list1", "RED")
+    assert formatted == []
+
+
+def test_item_tool_response_survives_formatting_failure(keep, monkeypatch):
+    def boom(k, note, strict=False):
+        raise RuntimeError("parse failed")
+
+    monkeypatch.setattr(cli, "formatting_for", boom)
+    result = cli.update_list_item("list1", "i1", checked=True)
+    assert result["items"][0]["checked"] is True
+    assert keep.sync_calls == 1
+
+
 def test_update_list_item_checks_formatted_item(keep, formatted):
     cli.update_list_item("list1", "i1", checked=True)
     assert keep.notes["list1"].items[0].checked is True
-    assert formatted == []
+    assert True not in formatted  # no guard lookup; only the response's read
 
 
 def test_update_list_item_same_text_is_not_a_change(keep, formatted):
     cli.update_list_item("list1", "i1", text="existing", checked=True)
-    assert formatted == []
+    assert True not in formatted  # no guard lookup; only the response's read
 
 
 def test_update_list_item_discard_formatting(keep, formatted):
     cli.update_list_item("list1", "i1", text="new", discard_formatting=True)
     assert keep.notes["list1"].items[0].text == "new"
-    assert formatted == []
+    assert True not in formatted  # no guard lookup; only the response's read
 
 
 def test_update_list_item_plain_item_text_change(keep, formatted):

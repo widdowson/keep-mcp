@@ -87,6 +87,14 @@ def _get_list_or_raise(note_id: str):
     return keep, note
 
 
+def _response_formatting(keep, note):
+    """Formatting for an item tool's response; never fails the write."""
+    try:
+        return formatting_for(keep, note)
+    except Exception:  # noqa: BLE001 - the write has already been saved
+        return {}
+
+
 def _guard_formatting(keep, note, item_ids, discard_formatting: bool):
     """Refuse to rewrite formatted text unless the caller accepts the loss.
 
@@ -333,7 +341,7 @@ def update_list_item(
             parent.indent(item)
 
     keep.sync()
-    return serialize_note(note)
+    return serialize_note(note, _response_formatting(keep, note))
 
 
 @mcp.tool()
@@ -387,7 +395,7 @@ def move_list_item(note_id: str, item_id: str, position: StrictInt) -> dict[str,
     items.insert(position, item)
     if _set_list_order(note, [item.id for item in items]):
         keep.sync()
-    return serialize_note(note)
+    return serialize_note(note, _response_formatting(keep, note))
 
 
 @mcp.tool(annotations=DESTRUCTIVE)
@@ -407,7 +415,7 @@ def reorder_list_items(note_id: str, item_ids: list[str]) -> dict[str, Any]:
         raise ToolError("item_ids must contain every current checklist item ID exactly once")
     if _set_list_order(note, item_ids):
         keep.sync()
-    return serialize_note(note)
+    return serialize_note(note, _response_formatting(keep, note))
 
 
 @mcp.tool(annotations=DESTRUCTIVE)
@@ -461,7 +469,7 @@ def update_note(
         note.text = text
 
     keep.sync()
-    return serialize_note(note)
+    return serialize_note(note, _response_formatting(keep, note))
 
 
 @mcp.tool()

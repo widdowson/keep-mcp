@@ -128,7 +128,7 @@ def note_formatting(keep, notes, strict=False):
     if not pairs:
         return {}
     try:
-        models = formatting.reader.for_notes(keep, pairs)
+        return _describe_notes(notes, formatting.reader.for_notes(keep, pairs))
     except Exception as exc:
         formatting.logger.warning('Could not fetch Keep formatting', exc_info=True)
         if strict:
@@ -138,6 +138,8 @@ def note_formatting(keep, notes, strict=False):
             ) from exc
         return {}
 
+
+def _describe_notes(notes, models):
     result = {}
     for note in notes:
         parsed_items = models.get(note.id)
