@@ -84,7 +84,8 @@ Older instructions may ask for your Google password or an app password and call 
 
 ### Query and read tools
 * `find`: Search notes (case-insensitive by default) with optional filters for labels, colors, pinned, archived, trashed, creation/update date ranges (ISO 8601, UTC), and a result limit (default 50)
-* `get_note`: Get a single note by ID
+* `get_note`: Get a single note by ID. Items carrying Keep fields this server does not model (such as rich-text formatting) include them as `unmodeled_fields`
+* `get_note_raw`: Get the raw Keep sync JSON for a note and its child nodes, for diagnosing unmodelled fields
 
 ### Creation and update tools
 * `create_note`: Create a new note with title and text (automatically adds keep-mcp label)
@@ -162,7 +163,14 @@ replacement. Concurrent external edits can also affect the final order.
 * `add_note_collaborator`: Add a collaborator email to a note
 * `remove_note_collaborator`: Remove a collaborator email from a note
 * `list_note_media`: List media blobs for a note (with media links)
+* `add_note_image`: Attach a PNG, JPEG or GIF (base64 or public https URL, up to 10 MB) to a note, optionally replacing an existing image once the upload succeeds. Experimental: uses the Keep Android app's media upload endpoint, which gkeepapi does not wrap
 * `download_media`: Download a note's media (images, drawings, audio) to a local directory through the authenticated session (the raw media links answer 403 to plain HTTP clients). Not available over Streamable HTTP, where the files would land on the server
+
+### Rich-text formatting
+
+gkeepapi does not model Keep's rich-text formatting and rebuilds each node from its own model when saving, which can strip formatting from an edited item. This server records the fields gkeepapi ignores on each list item and sends them back unchanged, so checking, moving and reordering a formatted item keeps its formatting. Changing the text of a formatted item (or replacing a list containing one) would misalign or drop the formatting, so those calls are refused unless `discard_formatting` is `true`.
+
+`scripts/dump_raw_nodes.py` prints a note's raw sync JSON without writing anything; it only needs gkeepapi, so it also runs inside a deployed container: `docker exec -i keep-mcp python - NOTE_ID [CAPABILITY ...] < scripts/dump_raw_nodes.py`.
 
 By default, all destructive and modification operations are restricted to notes that have were created by the MCP server (i.e. have the keep-mcp label). Set `UNSAFE_MODE` to `true` to bypass this restriction.
 
