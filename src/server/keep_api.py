@@ -1,4 +1,5 @@
 import ipaddress
+import json
 import os
 import socket
 import struct
@@ -417,6 +418,56 @@ def _upload_error(step, response):
     return ToolError(f'Keep image upload failed at {step}: HTTP {response.status_code} {body}')
 
 
+class _UploadBlob(gkeepapi.node.Blob):
+    """A new image node that also sends parentServerId, as the Android app does."""
+
+    __slots__ = ('parent_server_id',)
+
+    def __init__(self, parent_id=None, parent_server_id=None, **kwargs):
+        super().__init__(parent_id=parent_id, **kwargs)
+        self.parent_server_id = parent_server_id
+
+    def save(self, clean=True):
+        ret = super().save(clean)
+        if self.parent_server_id is not None:
+            ret['parentServerId'] = self.parent_server_id
+        return ret
+
+
+def _sync_capturing(keep, node_id):
+    """
+    Sync, and return what was sent and received for one node.
+
+    For diagnosing a node the server doesn't acknowledge. Returns
+    (sent, received): the node dicts with that id, or None when absent.
+    """
+    api = keep._keep_api
+    original = api.changes
+    seen = {'sent': None, 'received': None}
+
+    def changes(*args, **kwargs):
+        for raw in kwargs.get('nodes') or []:
+            if raw.get('id') == node_id:
+                seen['sent'] = raw
+        response = original(*args, **kwargs)
+        for raw in response.get('nodes', []):
+            if raw.get('id') == node_id:
+                seen['received'] = raw
+        return response
+
+    api.changes = changes
+    try:
+        keep.sync()
+    finally:
+        del api.changes
+    return seen['sent'], seen['received']
+
+
+def _brief(value, limit=600):
+    text = json.dumps(value, default=str)
+    return text if len(text) <= limit else text[:limit] + '…'
+
+
 def upload_image(keep, note, data):
     """
     Attach an image to a note through Keep's media upload endpoint.
@@ -441,14 +492,20 @@ def upload_image(keep, note, data):
     image._height = height
     image._byte_size = len(data)
     image._extraction_status = 'PROCESSING_REQUESTED'
-    blob = gkeepapi.node.Blob(parent_id=note.id)
+    blob = _UploadBlob(parent_id=note.id, parent_server_id=note.server_id)
     blob.blob = image
     note.append(blob, True)
-    keep.sync()
+    # A fresh node isn't dirty until touched, and gkeepapi only uploads
+    # dirty nodes, so without this the blob is never sent at all.
+    blob.touch(True)
+    sent, received = _sync_capturing(keep, blob.id)
 
     try:
         if blob.server_id is None:
-            raise ToolError('Keep did not assign a server ID to the new image')
+            raise ToolError(
+                'Keep did not assign a server ID to the new image. '
+                f'sent={_brief(sent)} received={_brief(received)}'
+            )
 
         start = _authed_request(
             keep,
