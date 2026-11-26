@@ -1,7 +1,6 @@
 import base64
 import struct
 import zlib
-from types import SimpleNamespace
 
 import pytest
 from mcp.server.mcpserver.exceptions import ToolError
@@ -69,19 +68,36 @@ class FakeAuth:
         self.token = "tok2"
 
 
+class FakeKeepAPI:
+    def __init__(self, auth, accept=True):
+        self.auth = auth
+        self.accept = accept
+        self.sent = []
+
+    def getAuth(self):
+        return self.auth
+
+    def changes(self, nodes=None, **kwargs):
+        self.sent.append(nodes or [])
+        return {"nodes": [{"id": n["id"], "serverId": "srv-" + n["id"]} for n in nodes or []] if self.accept else []}
+
+
 class FakeKeep:
-    def __init__(self, note):
+    def __init__(self, note, accept=True):
         self.note = note
         self.auth = FakeAuth()
-        self._keep_api = SimpleNamespace(getAuth=lambda: self.auth)
+        self._keep_api = FakeKeepAPI(self.auth, accept)
         self.syncs = 0
 
     def sync(self):
+        # Like gkeepapi: upload only dirty child nodes, then apply server IDs.
         self.syncs += 1
-        # The server assigns server IDs to new nodes on the first sync.
+        dirty = [blob for blob in self.note.blobs if blob.dirty]
+        response = self._keep_api.changes(nodes=[blob.save() for blob in dirty])
+        by_id = {raw["id"]: raw for raw in response["nodes"]}
         for blob in self.note.blobs:
-            if blob.server_id is None:
-                blob.server_id = "srv-" + blob.id
+            if blob.id in by_id:
+                blob.server_id = by_id[blob.id]["serverId"]
 
 
 def make_note():
@@ -148,6 +164,30 @@ def test_upload_failure_removes_placeholder(monkeypatch):
         keep_api.upload_image(keep, note, png_bytes())
     (blob,) = note.blobs
     assert blob.deleted
+
+
+def test_new_blob_is_sent_with_parent_server_id(monkeypatch):
+    note = make_note()
+    keep = FakeKeep(note)
+    monkeypatch.setattr(
+        keep_api.requests, "request",
+        lambda method, url, **k: Response(200, {"Location": "https://u"}) if method == "POST" else Response(200),
+    )
+    blob = keep_api.upload_image(keep, note, png_bytes())
+    first_sync = keep._keep_api.sent[0]
+    (sent,) = [raw for raw in first_sync if raw["id"] == blob.id]
+    assert sent["type"] == "BLOB"
+    assert sent["parentServerId"] == "srv-note"
+    assert sent["blob"]["mimetype"] == "image/png"
+
+
+def test_unacknowledged_blob_reports_what_was_exchanged(monkeypatch):
+    note = make_note()
+    keep = FakeKeep(note, accept=False)
+    monkeypatch.setattr(keep_api.requests, "request", lambda *a, **k: pytest.fail("should not upload"))
+    with pytest.raises(ToolError, match=r"sent=\{.*BLOB.*received=null"):
+        keep_api.upload_image(keep, note, png_bytes())
+    assert not hasattr(keep._keep_api, "__dict__") or "changes" not in keep._keep_api.__dict__
 
 
 def test_upload_rejects_unsynced_note():
