@@ -4,6 +4,8 @@ Provides tools for interacting with Google Keep notes through MCP.
 """
 
 import argparse
+import base64
+import binascii
 import os
 import re
 from datetime import datetime, timezone
@@ -17,17 +19,23 @@ from mcp.types import ToolAnnotations
 from pydantic import ConfigDict, StrictBool, StrictInt
 from typing_extensions import Required, TypedDict
 
+from . import raw_nodes
 from .keep_api import (
     KEEP_MCP_LABEL,
     can_modify_note,
     fetch_blob_bytes,
+    fetch_image_url,
+    formatting_for,
     get_client,
     has_keep_mcp_label,
     is_unsafe_mode,
     keep_operation,
     media_extension,
+    note_formatting,
+    serialize_blob,
     serialize_label,
     serialize_note,
+    upload_image,
 )
 
 mcp = MCPServer("keep")
@@ -77,6 +85,25 @@ def _get_list_or_raise(note_id: str):
     if not isinstance(note, gkeepapi.node.List):
         raise ToolError(f"Note with ID {note_id} is not a list")
     return keep, note
+
+
+def _guard_formatting(keep, note, item_ids, discard_formatting: bool):
+    """Refuse to rewrite formatted text unless the caller accepts the loss.
+
+    Keep keeps formatting in a server-side model that this server's writes
+    don't carry, so new text would leave the formatting misaligned or dropped.
+    """
+    if discard_formatting:
+        return
+    formatted = formatting_for(keep, note, strict=True)
+    hit = [item_id for item_id in item_ids if item_id in formatted]
+    if hit:
+        what = "The note body" if hit == [""] else "List item(s) " + ", ".join(hit)
+        raise ToolError(
+            f"{what} has rich-text formatting (bold, italic, underline or a heading). "
+            "Changing the text would misalign or drop it. "
+            "Pass discard_formatting=true to do it anyway."
+        )
 
 
 def _parse_utc(value: str | None, param: str) -> datetime | None:
@@ -174,16 +201,22 @@ def find(
     if limit is not None:
         notes = islice(notes, max(limit, 0))
 
-    notes_data = [serialize_note(note) for note in notes]
-    return notes_data
+    notes = list(notes)
+    formats = note_formatting(keep, notes)
+    return [serialize_note(note, formats.get(note.id)) for note in notes]
 
 
 @mcp.tool(annotations=READ_ONLY)
 @keep_operation
 def get_note(note_id: str) -> dict[str, Any]:
-    """Get a note by ID."""
-    _, note = _get_note_or_raise(note_id)
-    return serialize_note(note)
+    """Get a note by ID.
+
+    Items with Keep rich-text formatting carry a formatting object: heading
+    level (1 or 2), styled spans (0-based, end-exclusive offsets into text) and
+    a markdown rendering (underline as <u>). find returns the same.
+    """
+    keep, note = _get_note_or_raise(note_id)
+    return serialize_note(note, formatting_for(keep, note))
 
 
 @mcp.tool(annotations=ADDITIVE)
@@ -269,10 +302,14 @@ def update_list_item(
     text: str | None = None,
     checked: bool | None = None,
     parent_item_id: str | None = None,
+    discard_formatting: bool = False,
 ) -> dict[str, Any]:
     """Update checklist item text, checked state, and/or parent.
 
     Set parent_item_id to re-parent the item; use "" to move it to the top level.
+    Checking, unchecking and moving keep the item's rich-text formatting. A text
+    change on a formatted item (one with formatting in get_note) is refused
+    unless discard_formatting is true.
     """
     keep, note = _get_list_or_raise(note_id)
 
@@ -280,7 +317,8 @@ def update_list_item(
     if not item:
         raise ToolError(f"List item with ID {item_id} not found")
 
-    if text is not None:
+    if text is not None and text != item.text:
+        _guard_formatting(keep, note, [item.id], discard_formatting)
         item.text = text
     if checked is not None:
         item.checked = checked
@@ -374,15 +412,20 @@ def reorder_list_items(note_id: str, item_ids: list[str]) -> dict[str, Any]:
 
 @mcp.tool(annotations=DESTRUCTIVE)
 @keep_operation
-def replace_list_items(note_id: str, items: list[ReplacementChecklistItem]) -> dict[str, Any]:
+def replace_list_items(
+    note_id: str, items: list[ReplacementChecklistItem], discard_formatting: bool = False
+) -> dict[str, Any]:
     """Replace all checklist items in input order; [] clears the checklist.
 
     Each item requires text; checked defaults to false. Old items are deleted
     and replacements receive new IDs. Note metadata is preserved. Indented
     checklists and unknown item fields are rejected. MCP validates before mutation
     and syncs once after mutation; this is not a server-side atomic transaction.
+    Replacement loses rich-text formatting, so a list with formatted items is
+    refused unless discard_formatting is true.
     """
     keep, note, old_items = _get_flat_list_or_raise(note_id)
+    _guard_formatting(keep, note, [item.id for item in old_items], discard_formatting)
     for item in old_items:
         item.delete()
     new_items = [note.add(text=item["text"], checked=item.get("checked", False)) for item in items]
@@ -393,13 +436,24 @@ def replace_list_items(note_id: str, items: list[ReplacementChecklistItem]) -> d
 
 @mcp.tool()
 @keep_operation
-def update_note(note_id: str, title: str | None = None, text: str | None = None) -> dict[str, Any]:
-    """Update a note's title and text, or a checklist's title. Use item tools for checklist text."""
+def update_note(
+    note_id: str,
+    title: str | None = None,
+    text: str | None = None,
+    discard_formatting: bool = False,
+) -> dict[str, Any]:
+    """Update a note's title and text, or a checklist's title. Use item tools for checklist text.
+
+    A text change on a note with rich-text formatting is refused unless
+    discard_formatting is true.
+    """
     keep, note = _get_note_or_raise(note_id)
     _ensure_modifiable(note)
 
     if text is not None and isinstance(note, gkeepapi.node.List):
         raise ToolError("Cannot replace checklist text: use the checklist item tools")
+    if text is not None and text != note.text:
+        _guard_formatting(keep, note, [""], discard_formatting)
 
     if title is not None:
         note.title = title
@@ -617,6 +671,69 @@ def list_note_media(note_id: str) -> list[dict[str, Any]]:
         )
 
     return media
+
+
+@mcp.tool(annotations=READ_ONLY)
+@keep_operation
+def get_note_raw(note_id: str) -> dict[str, Any]:
+    """Get the raw Keep sync JSON for a note and its child nodes (items, media).
+
+    For diagnosing fields this server does not model. Shows what the server
+    last sent; nodes created locally and not yet re-read show null.
+    """
+    _, note = _get_note_or_raise(note_id)
+    return {
+        "note": raw_nodes.raw_json(note),
+        "children": [
+            {"id": child.id, "type": child.type.value, "raw": raw_nodes.raw_json(child)}
+            for child in note.children
+        ],
+    }
+
+
+@mcp.tool(annotations=ADDITIVE)
+@keep_operation
+def add_note_image(
+    note_id: str,
+    image_base64: str | None = None,
+    image_url: str | None = None,
+    replace_blob_id: str | None = None,
+) -> dict[str, Any]:
+    """Attach a PNG, JPEG or GIF image to a note, optionally replacing an existing one.
+
+    Give exactly one of image_base64 (the file bytes, base64-encoded) or
+    image_url (a public https URL; redirects are not followed). Images are
+    capped at 10 MB. replace_blob_id, from get_note's media list, removes that
+    image once the new one has uploaded, so a failed upload leaves the old
+    image in place. Returns the new image's blob and the updated note.
+    """
+    if (image_base64 is None) == (image_url is None):
+        raise ToolError("Give exactly one of image_base64 or image_url")
+
+    keep, note = _get_note_or_raise(note_id)
+    _ensure_modifiable(note)
+
+    old_blob = None
+    if replace_blob_id is not None:
+        old_blob = next((blob for blob in note.blobs if blob.id == replace_blob_id), None)
+        if old_blob is None:
+            raise ToolError(f"Blob with ID {replace_blob_id} not found on note {note_id}")
+
+    if image_base64 is not None:
+        try:
+            data = base64.b64decode(image_base64, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise ToolError("image_base64 is not valid base64") from exc
+    else:
+        data = fetch_image_url(image_url)
+
+    blob = upload_image(keep, note, data)
+
+    if old_blob is not None:
+        old_blob.delete()
+        keep.sync()
+
+    return {"blob": serialize_blob(blob), "note": serialize_note(note)}
 
 
 @mcp.tool()

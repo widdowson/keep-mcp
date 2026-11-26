@@ -123,7 +123,7 @@ def test_tools_do_not_overlap_access_to_shared_state(monkeypatch):
     second_started = Event()
     overlap = Event()
 
-    def serialize(note):
+    def serialize(note, *_):
         if note == 'first':
             entered.set()
             assert release.wait(2)
@@ -133,6 +133,7 @@ def test_tools_do_not_overlap_access_to_shared_state(monkeypatch):
 
     monkeypatch.setattr(cli, '_get_note_or_raise', lambda note_id: (None, note_id))
     monkeypatch.setattr(cli, 'serialize_note', serialize)
+    monkeypatch.setattr(cli, 'formatting_for', lambda keep, note: {})
 
     def second_call():
         second_started.set()
