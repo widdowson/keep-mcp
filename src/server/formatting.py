@@ -208,18 +208,17 @@ class FormattingReader:
         Return {note id: {item id: parsed}} for (note id, updated) pairs.
 
         updated is the note's timestamps.updated string from the ordinary
-        sync. The cache is keyed on it, so a stale model is never served: one
-        refetch covers every stale note, and a note still out of step after it
-        gets no formatting.
+        sync. A note whose cached timestamp differs is refetched (one refetch
+        covers every stale note). If its timestamp still differs afterwards,
+        e.g. because the two syncs report it slightly differently, the fresh
+        model is used anyway: callers drop any item whose model text doesn't
+        match its synced text, so formatting is never shown misaligned.
         """
         if any(self._cache.get(note_id, (None,))[0] != updated for note_id, updated in notes):
             self._refresh(keep)
-        result = {}
-        for note_id, updated in notes:
-            cached = self._cache.get(note_id)
-            if cached is not None and cached[0] == updated:
-                result[note_id] = cached[1]
-        return result
+        return {
+            note_id: self._cache[note_id][1] for note_id, _ in notes if note_id in self._cache
+        }
 
 
 reader = FormattingReader()

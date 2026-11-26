@@ -124,11 +124,21 @@ def test_reader_caches_until_note_changes(monkeypatch):
     assert api.calls == 2
 
 
-def test_reader_never_serves_a_stale_model(monkeypatch):
+def test_reader_refetches_then_uses_fresh_model_despite_timestamp_skew(monkeypatch):
     reader = formatting.FormattingReader()
-    api = FakeApi([{"nodes": [cl_node("n1", "old", [CHUNK])], "toVersion": "1", "truncated": False}])
+    reader._cache = {"n1": ("old", {})}
+    api = FakeApi([{"nodes": [cl_node("n1", "skewed", [CHUNK])], "toVersion": "1", "truncated": False}])
     monkeypatch.setattr(reader, "_cl_api", lambda keep: api)
-    assert reader.for_notes(None, [("n1", "new")]) == {}
+    result = reader.for_notes(None, [("n1", "new")])
+    assert api.calls == 1
+    assert "cbx.46drfvnpmhbc" in result["n1"]
+
+
+def test_reader_unknown_note_gets_nothing(monkeypatch):
+    reader = formatting.FormattingReader()
+    api = FakeApi([{"nodes": [], "toVersion": "1", "truncated": False}])
+    monkeypatch.setattr(reader, "_cl_api", lambda keep: api)
+    assert reader.for_notes(None, [("n1", "t")]) == {}
 
 
 def test_cl_api_adds_capability(monkeypatch):
@@ -180,5 +190,7 @@ def test_note_formatting_failure(monkeypatch):
 
     monkeypatch.setattr(keep_api.formatting.reader, "for_notes", boom)
     assert keep_api.note_formatting(None, [note]) == {}
+    monkeypatch.setattr(keep_api.formatting.reader, "for_notes", lambda keep, pairs: {"n1": {"a": None}})
+    assert keep_api.note_formatting(None, [note]) == {}  # a parse failure is contained too
     with pytest.raises(ToolError, match="discard_formatting"):
         keep_api.note_formatting(None, [note], strict=True)

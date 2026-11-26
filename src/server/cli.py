@@ -87,6 +87,14 @@ def _get_list_or_raise(note_id: str):
     return keep, note
 
 
+def _response_formatting(keep, note):
+    """Formatting for an item tool's response; never fails the write."""
+    try:
+        return formatting_for(keep, note)
+    except Exception:  # noqa: BLE001 - the write has already been saved
+        return {}
+
+
 def _guard_formatting(keep, note, item_ids, discard_formatting: bool):
     """Refuse to rewrite formatted text unless the caller accepts the loss.
 
@@ -233,7 +241,7 @@ def create_note(title: str | None = None, text: str | None = None) -> dict[str, 
     note.labels.add(label)
     keep.sync()
 
-    return serialize_note(note, formatting_for(keep, note))
+    return serialize_note(note)
 
 
 @mcp.tool(annotations=ADDITIVE)
@@ -270,7 +278,7 @@ def create_list(title: str | None = None, items: list[ChecklistItem] | None = No
     note.labels.add(label)
 
     keep.sync()
-    return serialize_note(note, formatting_for(keep, note))
+    return serialize_note(note)
 
 
 @mcp.tool(annotations=ADDITIVE)
@@ -333,7 +341,7 @@ def update_list_item(
             parent.indent(item)
 
     keep.sync()
-    return serialize_note(note, formatting_for(keep, note))
+    return serialize_note(note, _response_formatting(keep, note))
 
 
 @mcp.tool()
@@ -387,7 +395,7 @@ def move_list_item(note_id: str, item_id: str, position: StrictInt) -> dict[str,
     items.insert(position, item)
     if _set_list_order(note, [item.id for item in items]):
         keep.sync()
-    return serialize_note(note, formatting_for(keep, note))
+    return serialize_note(note, _response_formatting(keep, note))
 
 
 @mcp.tool(annotations=DESTRUCTIVE)
@@ -407,7 +415,7 @@ def reorder_list_items(note_id: str, item_ids: list[str]) -> dict[str, Any]:
         raise ToolError("item_ids must contain every current checklist item ID exactly once")
     if _set_list_order(note, item_ids):
         keep.sync()
-    return serialize_note(note, formatting_for(keep, note))
+    return serialize_note(note, _response_formatting(keep, note))
 
 
 @mcp.tool(annotations=DESTRUCTIVE)
@@ -431,7 +439,7 @@ def replace_list_items(
     new_items = [note.add(text=item["text"], checked=item.get("checked", False)) for item in items]
     _set_list_order(note, [item.id for item in new_items])
     keep.sync()
-    return serialize_note(note, formatting_for(keep, note))
+    return serialize_note(note)
 
 
 @mcp.tool()
@@ -461,7 +469,7 @@ def update_note(
         note.text = text
 
     keep.sync()
-    return serialize_note(note, formatting_for(keep, note))
+    return serialize_note(note, _response_formatting(keep, note))
 
 
 @mcp.tool()
@@ -474,7 +482,7 @@ def set_note_color(note_id: str, color: Color) -> dict[str, Any]:
     note.color = gkeepapi.node.ColorValue(color)
 
     keep.sync()
-    return serialize_note(note, formatting_for(keep, note))
+    return serialize_note(note)
 
 
 @mcp.tool()
@@ -486,7 +494,7 @@ def pin_note(note_id: str, pinned: bool = True) -> dict[str, Any]:
 
     note.pinned = pinned
     keep.sync()
-    return serialize_note(note, formatting_for(keep, note))
+    return serialize_note(note)
 
 
 @mcp.tool()
@@ -498,7 +506,7 @@ def archive_note(note_id: str, archived: bool = True) -> dict[str, Any]:
 
     note.archived = archived
     keep.sync()
-    return serialize_note(note, formatting_for(keep, note))
+    return serialize_note(note)
 
 
 @mcp.tool()
@@ -510,7 +518,7 @@ def trash_note(note_id: str) -> dict[str, Any]:
 
     note.trash()
     keep.sync()
-    return serialize_note(note, formatting_for(keep, note))
+    return serialize_note(note)
 
 
 @mcp.tool()
@@ -523,7 +531,7 @@ def restore_note(note_id: str) -> dict[str, Any]:
     note.untrash()
     note.undelete()
     keep.sync()
-    return serialize_note(note, formatting_for(keep, note))
+    return serialize_note(note)
 
 
 @mcp.tool()
@@ -598,7 +606,7 @@ def add_label_to_note(note_id: str, label_id: str) -> dict[str, Any]:
 
     note.labels.add(label)
     keep.sync()
-    return serialize_note(note, formatting_for(keep, note))
+    return serialize_note(note)
 
 
 @mcp.tool()
@@ -619,7 +627,7 @@ def remove_label_from_note(note_id: str, label_id: str) -> dict[str, Any]:
 
     note.labels.remove(label)
     keep.sync()
-    return serialize_note(note, formatting_for(keep, note))
+    return serialize_note(note)
 
 
 @mcp.tool(annotations=READ_ONLY)
@@ -639,7 +647,7 @@ def add_note_collaborator(note_id: str, email: str) -> dict[str, Any]:
 
     note.collaborators.add(email)
     keep.sync()
-    return serialize_note(note, formatting_for(keep, note))
+    return serialize_note(note)
 
 
 @mcp.tool()
@@ -651,7 +659,7 @@ def remove_note_collaborator(note_id: str, email: str) -> dict[str, Any]:
 
     note.collaborators.remove(email)
     keep.sync()
-    return serialize_note(note, formatting_for(keep, note))
+    return serialize_note(note)
 
 
 @mcp.tool(annotations=READ_ONLY)
@@ -733,7 +741,7 @@ def add_note_image(
         old_blob.delete()
         keep.sync()
 
-    return {"blob": serialize_blob(blob), "note": serialize_note(note, formatting_for(keep, note))}
+    return {"blob": serialize_blob(blob), "note": serialize_note(note)}
 
 
 @mcp.tool()
